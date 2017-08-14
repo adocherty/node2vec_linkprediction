@@ -9,9 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import networkx as nx
 import node2vec
-import operator as op
 from gensim.models import Word2Vec
-from gensim.models.keyedvectors import KeyedVectors
 from sklearn import metrics, model_selection, pipeline
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -88,12 +86,14 @@ class GraphN2V(node2vec.Graph):
     def __init__(self,
                  nx_G=None, is_directed=False,
                  prop_pos=0.5, prop_neg=0.5,
+                 workers=1,
                  random_seed=None):
         self.G = nx_G
         self.is_directed = is_directed
         self.prop_pos = prop_neg
         self.prop_neg = prop_pos
         self.wvecs = None
+        self.workers = workers
         self._rnd = np.random.RandomState(seed=random_seed)
 
     def read_graph(self, input, enforce_connectivity=True, weighted=False, directed=False):
@@ -115,15 +115,15 @@ class GraphN2V(node2vec.Graph):
             G = max(nx.connected_component_subgraphs(G), key=len)
             print("Input graph not connected: using largest connected subgraph")
 
-        # I'm not going to consider self-edges right now
-        # There aren't that many for AstroPh.
+        # Remove nodes with self-edges
+        # I'm not sure what these imply in the dataset
         for se in G.nodes_with_selfloops():
             G.remove_edge(se, se)
 
         print("Read graph, nodes: %d, edges: %d" % (G.number_of_nodes(), G.number_of_edges()))
         self.G = G
 
-    def learn_embeddings(self, walks, dimensions, window_size=10, workers=4, niter=5):
+    def learn_embeddings(self, walks, dimensions, window_size=10, niter=5):
         '''
         Learn embeddings by optimizing the Skipgram objective using SGD.
         '''
@@ -134,7 +134,7 @@ class GraphN2V(node2vec.Graph):
                          window=window_size,
                          min_count=0,
                          sg=1,
-                         workers=workers,
+                         workers=self.workers,
                          iter=niter)
         self.wvecs = model.wv
 
@@ -192,7 +192,7 @@ class GraphN2V(node2vec.Graph):
                 n_ignored_count += 1
             else:
                 pos_edge_list.append(edge)
-                print("Pos Edges: %d" % n_count, end="\r")
+                print("Found: %d    " % (n_count), end="\r")
                 n_count += 1
 
             # Exit if we've found npos nodes or we have gone through the whole list
@@ -211,8 +211,7 @@ class GraphN2V(node2vec.Graph):
         labels[:len(self._pos_edge_list)] = 1
         return edges, labels
 
-    def train_embeddings(self, p, q, dimensions, num_walks,
-                         walk_length, window_size, workers=1):
+    def train_embeddings(self, p, q, dimensions, num_walks, walk_length, window_size):
         """
         Calculate nodde embedding with specified parameters
         :param p:
@@ -221,7 +220,6 @@ class GraphN2V(node2vec.Graph):
         :param num_walks:
         :param walk_length:
         :param window_size:
-        :param workers:
         :return:
         """
         self.p = p
@@ -229,7 +227,7 @@ class GraphN2V(node2vec.Graph):
         self.preprocess_transition_probs()
         walks = self.simulate_walks(num_walks, walk_length)
         self.learn_embeddings(
-            walks, dimensions, window_size, workers=workers
+            walks, dimensions, window_size
         )
 
     def edges_to_features(self, edge_list, edge_function, dimensions):
@@ -293,16 +291,22 @@ def create_train_test_graphs(args):
         print("Regenerating link prediction graphs")
         # Train graph embeddings on graph with random links
         Gtrain = GraphN2V(is_directed=False,
-                          prop_pos=prop_pos, prop_neg=prop_neg,
-                          random_seed=0x12A283)
-        Gtrain.read_graph(args.input, weighted=args.weighted, directed=args.directed)
+                          prop_pos=prop_pos,
+                          prop_neg=prop_neg,
+                          workers=args.workers)
+        Gtrain.read_graph(args.input,
+                          weighted=args.weighted,
+                          directed=args.directed)
         Gtrain.generate_pos_neg_links()
 
         # Generate a different random graph for testing
         Gtest = GraphN2V(is_directed=False,
-                         prop_pos=prop_pos, prop_neg=prop_neg,
-                         random_seed=0x223C4D2)
-        Gtest.read_graph(args.input, weighted=args.weighted, directed=args.directed)
+                         prop_pos=prop_pos,
+                         prop_neg=prop_neg,
+                         workers = args.workers)
+        Gtest.read_graph(args.input,
+                         weighted=args.weighted,
+                         directed=args.directed)
         Gtest.generate_pos_neg_links()
 
         # Cache generated  graph
@@ -423,7 +427,7 @@ def plot_parameter_sensitivity(args):
                 print("%s = %.3f; AUC train: %.4g AUC test: %.4g"
                       % (param, pv, auc_train, auc_test))
 
-            # Add mean of partitoned scores
+            # Add mean of scores
             param_aucs.append(np.mean(cv_aucs))
 
         # Plot figure
@@ -432,7 +436,9 @@ def plot_parameter_sensitivity(args):
         ax.set_xlabel(xlabel)
         ax.set_ylabel('AUC')
 
-    plt.savefig()
+    plt.tight_layout()
+    sens_plot_fn = "sensitivity_%s.png" % (os.path.basename(args.input))
+    plt.savefig(sens_plot_fn)
     plt.show()
 
 
